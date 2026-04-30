@@ -130,8 +130,8 @@ alice 和 bob 的会话：
 # 访问 https://go.dev/dl/ 下载对应平台的安装包
 
 # Debian/Ubuntu 也可以用：
-wget https://go.dev/dl/go1.22.1.linux-amd64.tar.gz
-sudo tar -C /usr/local -xzf go1.22.1.linux-amd64.tar.gz
+wget https://go.dev/dl/go1.26.0.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.26.0.linux-amd64.tar.gz
 
 # 配置环境变量
 echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
@@ -141,7 +141,7 @@ source ~/.bashrc
 
 # 验证
 go version
-# 输出：go version go1.22.1 linux/amd64
+# 输出：go version go1.26.0 linux/amd64
 ```
 
 **Go 基础速记**（如果你不熟悉 Go）：

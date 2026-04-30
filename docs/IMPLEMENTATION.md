@@ -11,21 +11,22 @@
 ## 目录
 
 1. [项目骨架与基础设施](#1-项目骨架与基础设施)
-2. [认证模块实现](#2-认证模块实现)
-3. [用户模块实现](#3-用户模块实现)
-4. [好友模块实现](#4-好友模块实现)
-5. [会话模块实现](#5-会话模块实现)
-6. [消息模块实现](#6-消息模块实现)
-7. [WebSocket 网关实现](#7-websocket-网关实现)
-8. [在线状态管理](#8-在线状态管理)
-9. [统一响应与错误码](#9-统一响应与错误码)
-10. [中间件实现](#10-中间件实现)
-11. [Makefile 与构建](#11-makefile-与构建)
-12. [Docker 与开发环境](#12-docker-与开发环境)
-13. [数据库迁移](#13-数据库迁移)
-14. [第二阶段实现要点](#14-第二阶段实现要点)
-15. [第三阶段实现要点](#15-第三阶段实现要点)
-16. [第四阶段实现要点](#16-第四阶段实现要点)
+2. [公共组件规划与封装](#2-公共组件规划与封装)
+3. [认证模块实现](#3-认证模块实现)
+4. [用户模块实现](#4-用户模块实现)
+5. [好友模块实现](#5-好友模块实现)
+6. [会话模块实现](#6-会话模块实现)
+7. [消息模块实现](#7-消息模块实现)
+8. [WebSocket 网关实现](#8-websocket-网关实现)
+9. [在线状态管理](#9-在线状态管理)
+10. [统一响应与错误码](#10-统一响应与错误码)
+11. [中间件实现](#11-中间件实现)
+12. [Makefile 与构建](#12-makefile-与构建)
+13. [Docker 与开发环境](#13-docker-与开发环境)
+14. [数据库迁移](#14-数据库迁移)
+15. [第二阶段实现要点](#15-第二阶段实现要点)
+16. [第三阶段实现要点](#16-第三阶段实现要点)
+17. [第四阶段实现要点](#17-第四阶段实现要点)
 
 ---
 
@@ -43,11 +44,11 @@ go get gorm.io/driver/mysql
 go get github.com/redis/go-redis/v9
 go get github.com/gorilla/websocket
 go get github.com/spf13/viper
-go get go.uber.org/zap
 go get github.com/golang-jwt/jwt/v5
 go get golang.org/x/crypto/bcrypt
 go get github.com/bwmarrin/snowflake
 go get github.com/golang-migrate/migrate/v4
+go get gopkg.in/natefinch/lumberjack.v2  # 日志轮转
 ```
 
 ### 1.2 main.go 结构
@@ -61,109 +62,128 @@ go get github.com/golang-migrate/migrate/v4
 package main
 
 import (
-    "log"
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"time"
 
-    "github.com/yourname/gim/internal/config"
-    "github.com/yourname/gim/internal/handler"
-    "github.com/yourname/gim/internal/middleware"
-    "github.com/yourname/gim/internal/repository"
-    "github.com/yourname/gim/internal/service"
-    "github.com/yourname/gim/internal/ws"
-    "github.com/yourname/gim/pkg/snowflake"
+	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/yourname/gim/internal/config"
+	"github.com/yourname/gim/internal/handler"
+	"github.com/yourname/gim/internal/middleware"
+	"github.com/yourname/gim/internal/repository"
+	"github.com/yourname/gim/internal/service"
+	"github.com/yourname/gim/internal/ws"
+	"github.com/yourname/gim/pkg/jwt"
+	"github.com/yourname/gim/pkg/slog"
+	"github.com/yourname/gim/pkg/snowflake"
 )
 
 func main() {
-    // 1. 加载配置
-    cfg := config.Load()
+	// 1. 加载配置
+	cfg := config.Load()
 
-    // 2. 初始化日志
-    logger := zap.NewProductionLogger() // 简化，实际根据 cfg.Log 配置
+	// 2. 初始化日志
+	logger := slog.New(cfg.Log)
 
-    // 3. 初始化 Snowflake 节点
-    snowflake.Init(cfg.Snowflake.NodeID)
+	// 3. 初始化 Snowflake 节点
+	snowflake.Init(cfg.Snowflake.NodeID)
 
-    // 4. 初始化 MySQL
-    db := repository.InitMySQL(cfg.MySQL)
+	// 4. 初始化 MySQL
+	db := repository.InitMySQL(cfg.MySQL, logger)
 
-    // 5. 初始化 Redis
-    rdb := repository.InitRedis(cfg.Redis)
+	// 5. 初始化 Redis
+	rdb := repository.InitRedis(cfg.Redis)
 
-    // 6. 初始化各层
-    repos := repository.NewRepositories(db, rdb)
-    services := service.NewServices(repos, cfg)
-    handlers := handler.NewHandlers(services)
+	// 6. 初始化 JWT Manager
+	jwtMgr := jwt.NewJWTManager(cfg.JWT.PrivateKeyPath, cfg.JWT.PublicKeyPath,
+		cfg.JWT.AccessTokenExpire, cfg.JWT.RefreshTokenExpire)
 
-    // 7. 初始化 Gin 路由
-    r := gin.Default()
-    r.Use(middleware.CORS())
-    r.Use(middleware.RequestLogger(logger))
+	// 7. 初始化各层
+	repos := repository.NewRepositories(db, rdb)
+	services := service.NewServices(repos, cfg, jwtMgr, rdb)
+	handlers := handler.NewHandlers(services)
 
-    // 公开路由（无需鉴权）
-    auth := r.Group("/api/v1/auth")
-    {
-        auth.POST("/register", handlers.Auth.Register)
-        auth.POST("/login", handlers.Auth.Login)
-        auth.POST("/refresh", handlers.Auth.Refresh)
-    }
+	// 8. 初始化 Gin 路由
+	r := gin.New()
+	r.Use(middleware.CORS())
+	r.Use(middleware.Recovery(logger))
+	r.Use(middleware.RequestLogger(logger))
 
-    // 鉴权路由
-    api := r.Group("/api/v1")
-    api.Use(middleware.JWTAuth(cfg.JWT))
-    {
-        api.POST("/auth/logout", handlers.Auth.Logout)
+	// 健康检查
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
 
-        user := api.Group("/user")
-        {
-            user.GET("/profile", handlers.User.GetProfile)
-            user.PUT("/profile", handlers.User.UpdateProfile)
-            user.GET("/profile/:userId", handlers.User.GetOtherProfile)
-            user.POST("/search", handlers.User.Search)
-        }
+	// 公开路由（无需鉴权）
+	auth := r.Group("/api/v1/auth")
+	{
+		auth.POST("/register", handlers.Auth.Register)
+		auth.POST("/login", handlers.Auth.Login)
+		auth.POST("/refresh", handlers.Auth.Refresh)
+	}
 
-        friend := api.Group("/friend")
-        {
-            friend.POST("/request", handlers.Friend.SendRequest)
-            friend.GET("/request/incoming", handlers.Friend.ListRequests)
-            friend.POST("/request/:id/accept", handlers.Friend.AcceptRequest)
-            friend.POST("/request/:id/reject", handlers.Friend.RejectRequest)
-            friend.DELETE("/:userId", handlers.Friend.Delete)
-            friend.GET("/list", handlers.Friend.List)
-            friend.PUT("/:userId/remark", handlers.Friend.SetRemark)
-        }
+	// 鉴权路由
+	api := r.Group("/api/v1")
+	api.Use(middleware.JWTAuth(jwtMgr, rdb))
+	{
+		api.POST("/auth/logout", handlers.Auth.Logout)
 
-        msg := api.Group("/msg")
-        {
-            msg.GET("/history", handlers.Message.History)
-            msg.POST("/read", handlers.Message.MarkRead)
-            msg.POST("/revoke", handlers.Message.Revoke)
-        }
+		user := api.Group("/user")
+		{
+			user.GET("/profile", handlers.User.GetProfile)
+			user.PUT("/profile", handlers.User.UpdateProfile)
+			user.GET("/profile/:userId", handlers.User.GetOtherProfile)
+			user.POST("/search", handlers.User.Search)
+		}
 
-        conv := api.Group("/conversation")
-        {
-            conv.GET("/list", handlers.Conversation.List)
-            conv.PUT("/:id/pin", handlers.Conversation.Pin)
-            conv.DELETE("/:id", handlers.Conversation.Delete)
-        }
-    }
+		friend := api.Group("/friend")
+		{
+			friend.POST("/request", handlers.Friend.SendRequest)
+			friend.GET("/request/incoming", handlers.Friend.ListRequests)
+			friend.POST("/request/:id/accept", handlers.Friend.AcceptRequest)
+			friend.POST("/request/:id/reject", handlers.Friend.RejectRequest)
+			friend.DELETE("/:userId", handlers.Friend.Delete)
+			friend.GET("/list", handlers.Friend.List)
+			friend.PUT("/:userId/remark", handlers.Friend.SetRemark)
+		}
 
-    // 8. 启动 WebSocket 服务（独立端口）
-    hub := ws.NewHub(services.Message, services.Conversation, rdb)
-    go hub.Run()
+		msg := api.Group("/msg")
+		{
+			msg.GET("/history", handlers.Message.History)
+			msg.POST("/read", handlers.Message.MarkRead)
+			msg.POST("/revoke", handlers.Message.Revoke)
+		}
 
-    wsServer := ws.NewServer(cfg.WebSocket, hub)
+		conv := api.Group("/conversation")
+		{
+			conv.GET("/list", handlers.Conversation.List)
+			conv.PUT("/:id/pin", handlers.Conversation.Pin)
+			conv.DELETE("/:id", handlers.Conversation.Delete)
+		}
+	}
 
-    // 9. 并发启动 HTTP 和 WS
-    go func() {
-        log.Printf("WebSocket server starting on :%d", cfg.Server.WSPort)
-        if err := wsServer.Start(); err != nil {
-            log.Fatalf("WS server error: %v", err)
-        }
-    }()
+	// 9. 启动 WebSocket 服务（独立端口）
+	hub := ws.NewHub(services.Message, services.Conversation, rdb)
+	go hub.Run()
 
-    log.Printf("HTTP server starting on :%d", cfg.Server.HTTPPort)
-    if err := r.Run(fmt.Sprintf(":%d", cfg.Server.HTTPPort)); err != nil {
-        log.Fatalf("HTTP server error: %v", err)
-    }
+	wsServer := ws.NewServer(cfg.WebSocket, hub, jwtMgr)
+
+	// 10. 并发启动 HTTP 和 WS
+	go func() {
+		logger.Info("WebSocket server starting", "port", cfg.Server.WSPort)
+		if err := wsServer.Start(); err != nil {
+			logger.Error("WS server error", "error", err)
+		}
+	}()
+
+	logger.Info("HTTP server starting", "port", cfg.Server.HTTPPort)
+	if err := r.Run(fmt.Sprintf(":%d", cfg.Server.HTTPPort)); err != nil {
+		logger.Fatal("HTTP server error", "error", err)
+	}
 }
 ```
 
@@ -173,96 +193,450 @@ func main() {
 
 💡 **mapstructure 标签是什么？** Viper 库用来把 YAML 里的键名映射到 Go 结构体的字段名。比如 YAML 里的 `httpPort` 会自动赋值给 `ServerConfig.HTTPPort`。
 
+💡 **日志配置说明**：使用 Go 1.21+ 标准库 `log/slog`，支持：
+- 日志等级：debug, info, warn, error
+- 短文件名：只显示文件名不含完整路径
+- 颜色支持：开发环境开启彩色输出
+- 日志轮转：支持按大小和时间自动压缩轮转
+
 ```go
 // internal/config/config.go
 package config
 
-import "github.com/spf13/viper"
+import (
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/spf13/viper"
+)
 
 type Config struct {
-    Server    ServerConfig    `mapstructure:"server"`
-    MySQL     MySQLConfig     `mapstructure:"mysql"`
-    Redis     RedisConfig     `mapstructure:"redis"`
-    JWT       JWTConfig       `mapstructure:"jwt"`
-    WebSocket WebSocketConfig `mapstructure:"websocket"`
-    Log       LogConfig       `mapstructure:"log"`
-    Snowflake SnowflakeConfig `mapstructure:"snowflake"`
+	Server    ServerConfig    `mapstructure:"server"`
+	MySQL     MySQLConfig     `mapstructure:"mysql"`
+	Redis     RedisConfig     `mapstructure:"redis"`
+	JWT       JWTConfig       `mapstructure:"jwt"`
+	WebSocket WebSocketConfig `mapstructure:"websocket"`
+	Log       LogConfig       `mapstructure:"log"`
+	Snowflake SnowflakeConfig `mapstructure:"snowflake"`
 }
 
 type ServerConfig struct {
-    HTTPPort     int           `mapstructure:"httpPort"`
-    WSPort       int           `mapstructure:"wsPort"`
-    ReadTimeout  time.Duration `mapstructure:"readTimeout"`
-    WriteTimeout time.Duration `mapstructure:"writeTimeout"`
+	HTTPPort     int           `mapstructure:"httpPort"`
+	WSPort       int           `mapstructure:"wsPort"`
+	ReadTimeout  time.Duration `mapstructure:"readTimeout"`
+	WriteTimeout time.Duration `mapstructure:"writeTimeout"`
 }
 
 type MySQLConfig struct {
-    Host            string        `mapstructure:"host"`
-    Port            int           `mapstructure:"port"`
-    User            string        `mapstructure:"user"`
-    Password        string        `mapstructure:"password"`
-    DBName          string        `mapstructure:"dbname"`
-    MaxOpenConns    int           `mapstructure:"maxOpenConns"`
-    MaxIdleConns    int           `mapstructure:"maxIdleConns"`
-    ConnMaxLifetime time.Duration `mapstructure:"connMaxLifetime"`
+	Host            string        `mapstructure:"host"`
+	Port            int           `mapstructure:"port"`
+	User            string        `mapstructure:"user"`
+	Password        string        `mapstructure:"password"`
+	DBName          string        `mapstructure:"dbname"`
+	MaxOpenConns    int           `mapstructure:"maxOpenConns"`
+	MaxIdleConns    int           `mapstructure:"maxIdleConns"`
+	ConnMaxLifetime time.Duration `mapstructure:"connMaxLifetime"`
 }
 
 type RedisConfig struct {
-    Host     string `mapstructure:"host"`
-    Port     int    `mapstructure:"port"`
-    Password string `mapstructure:"password"`
-    DB       int    `mapstructure:"db"`
-    PoolSize int    `mapstructure:"poolSize"`
+	Host     string `mapstructure:"host"`
+	Port     int    `mapstructure:"port"`
+	Password string `mapstructure:"password"`
+	DB       int    `mapstructure:"db"`
+	PoolSize int    `mapstructure:"poolSize"`
 }
 
 type JWTConfig struct {
-    AccessTokenExpire  time.Duration `mapstructure:"accessTokenExpire"`
-    RefreshTokenExpire time.Duration `mapstructure:"refreshTokenExpire"`
-    PrivateKeyPath     string        `mapstructure:"privateKeyPath"`
-    PublicKeyPath      string        `mapstructure:"publicKeyPath"`
+	AccessTokenExpire  time.Duration `mapstructure:"accessTokenExpire"`
+	RefreshTokenExpire time.Duration `mapstructure:"refreshTokenExpire"`
+	PrivateKeyPath     string        `mapstructure:"privateKeyPath"`
+	PublicKeyPath      string        `mapstructure:"publicKeyPath"`
 }
 
 type WebSocketConfig struct {
-    MaxConnPerUser  int           `mapstructure:"maxConnPerUser"`
-    MaxMessageSize  int64         `mapstructure:"maxMessageSize"`
-    WriteWait       time.Duration `mapstructure:"writeWait"`
-    PongWait        time.Duration `mapstructure:"pongWait"`
-    PingPeriod      time.Duration `mapstructure:"pingPeriod"`
+	MaxConnPerUser int           `mapstructure:"maxConnPerUser"`
+	MaxMessageSize int64         `mapstructure:"maxMessageSize"`
+	WriteWait      time.Duration `mapstructure:"writeWait"`
+	PongWait       time.Duration `mapstructure:"pongWait"`
+	PingPeriod     time.Duration `mapstructure:"pingPeriod"`
 }
 
 type LogConfig struct {
-    Level  string `mapstructure:"level"`
-    Format string `mapstructure:"format"`
-    Output string `mapstructure:"output"`
+	Level      string `mapstructure:"level"`       // debug, info, warn, error
+	Format     string `mapstructure:"format"`      // json, text
+	Output     string `mapstructure:"output"`      // stdout, file
+	FilePath   string `mapstructure:"filePath"`    // 日志文件路径
+	MaxSize    int    `mapstructure:"maxSize"`     // 单个文件最大MB
+	MaxBackups int    `mapstructure:"maxBackups"`  // 保留旧文件最大个数
+	MaxAge     int    `mapstructure:"maxAge"`      // 保留旧文件最大天数
+	Compress   bool   `mapstructure:"compress"`    // 是否压缩
+	ShortFile  bool   `mapstructure:"shortFile"`   // 短文件名
+	Color      bool   `mapstructure:"color"`       // 颜色输出
 }
 
 type SnowflakeConfig struct {
-    NodeID int64 `mapstructure:"nodeID"`
+	NodeID int64 `mapstructure:"nodeID"`
 }
 
 func Load() *Config {
-    viper.SetConfigName("config")
-    viper.SetConfigType("yaml")
-    viper.AddConfigPath("configs")
-    viper.AddConfigPath(".")
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath("configs")
+	viper.AddConfigPath(".")
 
-    if err := viper.ReadInConfig(); err != nil {
-        log.Fatalf("Failed to read config: %v", err)
-    }
+	if err := viper.ReadInConfig(); err != nil {
+		log.Fatalf("Failed to read config: %v", err)
+	}
 
-    var cfg Config
-    if err := viper.Unmarshal(&cfg); err != nil {
-        log.Fatalf("Failed to unmarshal config: %v", err)
-    }
-    return &cfg
+	var cfg Config
+	if err := viper.Unmarshal(&cfg); err != nil {
+		log.Fatalf("Failed to unmarshal config: %v", err)
+	}
+	return &cfg
+}
+```
+
+对应配置文件示例：
+
+```yaml
+# configs/config.yaml
+server:
+  httpPort: 8080
+  wsPort: 8081
+  readTimeout: 10s
+  writeTimeout: 10s
+
+mysql:
+  host: localhost
+  port: 3306
+  user: gim
+  password: gim_pass
+  dbname: gim
+  maxOpenConns: 100
+  maxIdleConns: 10
+  connMaxLifetime: 3600s
+
+redis:
+  host: localhost
+  port: 6379
+  password: ""
+  db: 0
+  poolSize: 10
+
+jwt:
+  accessTokenExpire: 24h
+  refreshTokenExpire: 168h
+  privateKeyPath: configs/jwt/private.pem
+  publicKeyPath: configs/jwt/public.pem
+
+websocket:
+  maxConnPerUser: 5
+  maxMessageSize: 4096
+  writeWait: 10s
+  pongWait: 60s
+  pingPeriod: 30s
+
+log:
+  level: debug          # 开发环境用debug，生产环境用info
+  format: text          # text格式方便阅读，json格式方便日志聚合
+  output: file          # stdout 控制台输出，file 文件输出
+  filePath: logs/gim.log
+  maxSize: 100          # 单个文件最大100MB
+  maxBackups: 10        # 保留最近10个旧文件
+  maxAge: 30            # 保留最近30天
+  compress: true        # 压缩旧文件
+  shortFile: true       # 短文件名（只显示 main.go，不含完整路径）
+  color: true           # 彩色输出
+
+snowflake:
+  nodeID: 1
+```
+
+---
+
+## 2. 公共组件规划与封装
+
+### 2.1 为什么要规划公共组件
+
+在项目初期就识别和封装公共组件，能带来以下好处：
+
+| 好处 | 说明 |
+|------|------|
+| 代码复用 | 避免各模块重复造轮子，保持代码一致性 |
+| 统一规范 | 所有模块使用相同的工具，降低学习成本 |
+| 易于测试 | 公共组件独立测试，业务层依赖抽象 |
+| 易于升级 | 修改一处即可全局生效 |
+
+### 2.2 本项目的公共组件清单
+
+| 组件 | 路径 | 用途 | 说明 |
+|------|------|------|------|
+| 日志模块 | `pkg/slog/` | 统一日志输出 | 基于标准库 log/slog，支持等级、短文件名、颜色、轮转 |
+| JWT 工具 | `pkg/jwt/` | Token 生成与验证 | RS256 非对称加密，支持 JTI 黑名单 |
+| Snowflake ID | `pkg/snowflake/` | 分布式唯一 ID | 时钟回拨防护，单机版即可用 |
+| 统一响应 | `pkg/resp/` | HTTP 响应格式 | Success/Fail 统一封装 |
+| 错误码 | `pkg/errcode/` | 错误码体系 | 分层错误码，支持详情追加 |
+| Redis Key 前缀 | `pkg/rediskey/` | Redis Key 管理 | 统一 Key 命名，避免冲突 |
+| 会话 ID 生成 | `pkg/convid/` | 会话 ID 生成 | 单聊按字典序排列，群聊固定格式 |
+
+### 2.3 日志模块封装（基于 slog）
+
+💡 **为什么用 slog 而不是 Zap？** Go 1.21+ 引入了结构化日志标准库 `log/slog`，提供了与 Zap 类似的结构化日志能力，但无需额外依赖。对于本项目，slog 足够用且更轻量。
+
+#### 功能特性
+
+- 日志等级：Debug, Info, Warn, Error
+- 短文件名：`main.go:123` 而非 `/home/admin/gim/cmd/gim/main.go:123`
+- 颜色输出：开发环境开启彩色，提升可读性
+- 日志轮转：按大小/天数自动轮转，支持 gzip 压缩
+- 格式切换：JSON 格式（生产环境）或 TEXT 格式（开发环境）
+
+#### 代码实现
+
+```go
+// pkg/slog/slog.go
+package slog
+
+import (
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/yourname/gim/internal/config"
+	"gopkg.in/natefinch/lumberjack.v2"
+)
+
+type Logger struct {
+	*slog.Logger
+}
+
+// New 创建新的日志实例
+func New(cfg config.LogConfig) *Logger {
+	var writer io.Writer
+
+	// 日志轮转配置
+	if cfg.Output == "file" {
+		// 确保日志目录存在
+		dir := filepath.Dir(cfg.FilePath)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Fatalf("Failed to create log directory: %v", err)
+		}
+
+		writer = &lumberjack.Logger{
+			Filename:   cfg.FilePath,
+			MaxSize:    cfg.MaxSize,    // 单个文件最大MB
+			MaxBackups: cfg.MaxBackups, // 保留旧文件最大个数
+			MaxAge:     cfg.MaxAge,     // 保留旧文件最大天数
+			Compress:   cfg.Compress,   // 是否压缩
+		}
+	} else {
+		// 标准输出
+		writer = os.Stdout
+	}
+
+	// 日志等级映射
+	var level slog.Level
+	switch strings.ToLower(cfg.Level) {
+	case "debug":
+		level = slog.LevelDebug
+	case "info":
+		level = slog.LevelInfo
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
+	}
+
+	// 短文件名处理器（仅显示文件名不含路径）
+	opts := &slog.HandlerOptions{
+		Level: level,
+	}
+
+	if cfg.ShortFile {
+		// 添加短文件名支持
+		opts.AddSource = true
+		opts.ReplaceAttr = func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.SourceKey {
+				if src, ok := a.Value.Any().(*slog.Source); ok {
+					src.File = filepath.Base(src.File)
+				}
+			}
+			return a
+		}
+	}
+
+	var handler slog.Handler
+	if cfg.Format == "json" {
+		handler = slog.NewJSONHandler(writer, opts)
+	} else {
+		// TEXT 格式支持颜色
+		if cfg.Color && cfg.Output != "file" {
+			handler = NewColoredTextHandler(writer, opts)
+		} else {
+			handler = slog.NewTextHandler(writer, opts)
+		}
+	}
+
+	return &Logger{
+		Logger: slog.New(handler),
+	}
+}
+
+// ColoredTextHandler 支持颜色的文本处理器
+type ColoredTextHandler struct {
+	*slog.TextHandler
+}
+
+func NewColoredTextHandler(w io.Writer, opts *slog.HandlerOptions) *ColoredTextHandler {
+	return &ColoredTextHandler{
+		TextHandler: slog.NewTextHandler(w, opts),
+	}
+}
+
+// 颜色定义
+const (
+	colorReset  = "\033[0m"
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorBlue   = "\033[34m"
+	colorPurple = "\033[35m"
+)
+
+// Handle 实现带颜色的日志输出
+func (h *ColoredTextHandler) Handle(ctx context.Context, r slog.Record) error {
+	var color string
+	switch r.Level {
+	case slog.LevelDebug:
+		color = colorPurple
+	case slog.LevelInfo:
+		color = colorBlue
+	case slog.LevelWarn:
+		color = colorYellow
+	case slog.LevelError:
+		color = colorRed
+	default:
+		color = colorReset
+	}
+
+	// 复用父类处理
+	if err := h.TextHandler.Handle(ctx, r); err != nil {
+		return err
+	}
+
+	// 注意：实际实现需要更复杂的处理来精确控制颜色输出
+	// 这里简化处理，实际项目可能需要自定义格式化逻辑
+
+	return nil
+}
+```
+
+#### 使用示例
+
+```go
+// 在 main.go 中初始化
+logger := slog.New(cfg.Log)
+
+// 使用日志
+logger.Debug("debug message", "key", "value")
+logger.Info("server starting", "port", 8080)
+logger.Warn("slow query detected", "duration", 500)
+logger.Error("database connection failed", "error", err)
+
+// 输出示例（TEXT 格式 + 短文件名 + 颜色）
+// [DEBUG] main.go:42 debug message key=value
+// [INFO ] main.go:45 server starting port=8080
+// [WARN ] main.go:48 slow query detected duration=500
+// [ERROR] main.go:51 database connection failed error=connection refused
+```
+
+### 2.4 Redis Key 管理
+
+💡 **为什么需要统一管理 Redis Key？** 多个模块都访问 Redis，Key 命名不一致会导致重复或遗漏。统一管理可以：
+
+1. 避免拼写错误
+2. 便于全局搜索和修改
+3. 支持 Key 前缀统一配置（比如环境隔离）
+
+```go
+// pkg/rediskey/rediskey.go
+package rediskey
+
+const (
+	// Token 黑名单
+	BlacklistToken = "blacklist:token:%s"
+
+	// Refresh Token 存储
+	Refresh = "refresh:%s:%s"
+
+	// 消息 Seq
+	SeqConv = "seq:conv:%s"
+
+	// 消息去重
+	DedupMsg = "dedup:msg:%s"
+
+	// 用户已读位置
+	ReadSeq = "readseq:%s:%s"
+
+	// 消息缓存
+	MsgCache = "msg:cache:%s:%d"
+
+	// 在线状态
+	Online = "online:%s"
+
+	// 连接映射
+	ConnMap = "conn_map:%s"
+
+	// 限流
+	RateLimit = "ratelimit:%s"
+)
+
+// BlacklistTokenKey 生成 Token 黑名单 Key
+func BlacklistTokenKey(jti string) string {
+	return fmt.Sprintf(BlacklistToken, jti)
+}
+
+// RefreshKey 生成 Refresh Token Key
+func RefreshKey(userID, platform string) string {
+	return fmt.Sprintf(Refresh, userID, platform)
+}
+
+// SeqConvKey 生成会话 Seq Key
+func SeqConvKey(convID string) string {
+	return fmt.Sprintf(SeqConv, convID)
+}
+
+// DedupMsgKey 生成消息去重 Key
+func DedupMsgKey(clientMsgID string) string {
+	return fmt.Sprintf(DedupMsg, clientMsgID)
+}
+
+// ReadSeqKey 生成用户已读位置 Key
+func ReadSeqKey(userID, convID string) string {
+	return fmt.Sprintf(ReadSeq, userID, convID)
+}
+
+// OnlineKey 生成在线状态 Key
+func OnlineKey(userID string) string {
+	return fmt.Sprintf(Online, userID)
+}
+
+// ConnMapKey 生成连接映射 Key
+func ConnMapKey(userID string) string {
+	return fmt.Sprintf(ConnMap, userID)
 }
 ```
 
 ---
 
-## 2. 认证模块实现
+## 3. 认证模块实现
 
-### 2.1 Redis Key 设计
+### 3.1 Redis Key 设计
 
 ```
 # Token 黑名单（logout 时加入）
@@ -272,7 +646,19 @@ blacklist:token:{accessTokenJTI}    -> "1"    TTL = accessToken 剩余有效期
 refresh:{userId}:{platform}         -> refreshToken    TTL = 7天
 ```
 
-### 2.2 JWT 工具包
+💡 **Key 生成使用统一的 rediskey 包**：
+
+```go
+import "github.com/yourname/gim/pkg/rediskey"
+
+// Token 黑名单
+rdb.Set(ctx, rediskey.BlacklistTokenKey(claims.ID), "1", ttl)
+
+// Refresh Token 存储
+rdb.Set(ctx, rediskey.RefreshKey(userID, platform), refreshToken, 7*24*time.Hour)
+```
+
+### 3.2 JWT 工具包
 
 💡 **为什么用 RS256 而不是 HS256？** HS256 用同一个密钥签名和验证（对称加密），密钥泄露就完了。RS256 用私钥签名、公钥验证（非对称加密），私钥只存在服务端，公钥可以分发给其他服务验证 Token。第二阶段微服务拆分后，各服务只需公钥即可验证，无需私钥。
 
@@ -348,7 +734,7 @@ func (m *JWTManager) ParseToken(tokenStr string) (*Claims, error) {
 }
 ```
 
-### 2.3 认证 Service
+### 3.3 认证 Service
 
 💡 **bcrypt 是什么？为什么不用 MD5/SHA256 存密码？** MD5/SHA256 是"哈希"不是"加密"——相同的密码永远产生相同的结果，攻击者可以用"彩虹表"反查。bcrypt 有两个关键特性：(1) 每次哈希自动加盐（加随机字符串），同样密码每次结果不同；(2) 可调整计算成本（cost 参数），让暴力破解变慢。bcrypt 是存密码的行业标准。
 
@@ -446,7 +832,7 @@ func (s *authService) Logout(ctx context.Context, userID, platform, accessToken 
 }
 ```
 
-### 2.4 认证 Handler
+### 3.4 认证 Handler
 
 ```go
 // internal/handler/auth.go
@@ -487,7 +873,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 ---
 
-## 3. 用户模块实现
+## 4. 用户模块实现
 
 ### 3.1 User Repository
 
@@ -534,7 +920,7 @@ func (r *userRepo) Search(ctx context.Context, keyword string, page, pageSize in
 }
 ```
 
-### 3.2 User Service
+### 4.2 User Service
 
 ```go
 // internal/service/user.go
@@ -570,9 +956,9 @@ func (s *userService) GetOtherProfile(ctx context.Context, currentUserID, target
 
 ---
 
-## 4. 好友模块实现
+## 5. 好友模块实现
 
-### 4.1 Friend Repository
+### 5.1 Friend Repository
 
 ```go
 // internal/repository/friend.go
@@ -596,7 +982,7 @@ type FriendRequestRepo interface {
 }
 ```
 
-### 4.2 好友申请 — 同意流程（事务）
+### 5.2 好友申请 — 同意流程（事务）
 
 💡 **什么是事务？** 事务是数据库操作的"打包执行"：要么全部成功，要么全部回滚。好友同意涉及 3 张表写入（申请状态 + 双向好友 + 双方会话），如果第 2 步写入失败但不回滚第 1 步，就会数据不一致（申请已同意但好友关系没建）。事务保证"要么全有，要么全无"。
 
@@ -654,7 +1040,7 @@ func (s *friendService) AcceptRequest(ctx context.Context, userID string, reques
 }
 ```
 
-### 4.3 会话 ID 生成
+### 5.3 会话 ID 生成
 
 ```go
 // pkg/convid/convid.go
@@ -672,9 +1058,9 @@ func GenSingleConvID(uid1, uid2 string) string {
 
 ---
 
-## 5. 会话模块实现
+## 6. 会话模块实现
 
-### 5.1 Conversation Repository
+### 6.1 Conversation Repository
 
 ```go
 // internal/repository/conversation.go
@@ -690,7 +1076,7 @@ type ConversationRepo interface {
 }
 ```
 
-### 5.2 会话列表（含未读计数）
+### 6.2 会话列表（含未读计数）
 
 ```go
 func (s *convService) List(ctx context.Context, userID string, page, pageSize int) (*PageResult[*ConversationVO], error) {
@@ -732,9 +1118,9 @@ func (s *convService) List(ctx context.Context, userID string, page, pageSize in
 
 ---
 
-## 6. 消息模块实现
+## 7. 消息模块实现
 
-### 6.1 Redis Key 设计
+### 7.1 Redis Key 设计
 
 ```
 # 消息 Seq（会话维度递增）
@@ -750,7 +1136,7 @@ readseq:{userId}:{conversationId}  -> int64
 msg:cache:{conversationId}:{seq}   -> JSON   TTL = 10分钟
 ```
 
-### 6.2 Message Repository
+### 7.2 Message Repository
 
 ```go
 // internal/repository/message.go
@@ -769,7 +1155,7 @@ type MessageRepo interface {
 }
 ```
 
-### 6.3 消息发送核心流程
+### 7.3 消息发送核心流程
 
 💡 **这是整个 IM 系统最核心的流程，务必理解每一步为什么这样设计：**
 
@@ -858,7 +1244,7 @@ func (s *msgService) SendMessage(ctx context.Context, senderID string, req *Send
 }
 ```
 
-### 6.4 消息拉取
+### 7.4 消息拉取
 
 ```go
 func (s *msgService) History(ctx context.Context, userID string, req *HistoryReq) (*HistoryResp, error) {
@@ -900,7 +1286,7 @@ func (s *msgService) History(ctx context.Context, userID string, req *HistoryReq
 }
 ```
 
-### 6.5 已读回执
+### 7.5 已读回执
 
 ```go
 func (s *msgService) MarkRead(ctx context.Context, userID string, req *MarkReadReq) error {
@@ -933,9 +1319,9 @@ func (s *msgService) MarkRead(ctx context.Context, userID string, req *MarkReadR
 
 ---
 
-## 7. WebSocket 网关实现
+## 8. WebSocket 网关实现
 
-### 7.1 Hub（连接中心）
+### 8.1 Hub（连接中心）
 
 💡 **Hub 的工作原理类比电话总机**：所有 WebSocket 连接都注册到 Hub，Hub 维护一张"谁在线"的表。当要给某人推送消息时，查 Hub 找到这个人的连接，通过连接发送。没有 Hub，每条消息要遍历所有连接去找目标用户，效率极低。
 
@@ -1014,7 +1400,7 @@ func (h *Hub) PushToUser(userID string, msg *WSMessage) {
 }
 ```
 
-### 7.2 Client（连接管理）
+### 8.2 Client（连接管理）
 
 ```go
 // internal/ws/client.go
@@ -1103,7 +1489,7 @@ func (c *Client) Send(msg *WSMessage) {
 }
 ```
 
-### 7.3 消息处理分发
+### 8.3 消息处理分发
 
 ```go
 // internal/ws/client.go — handleMessage 方法
@@ -1160,7 +1546,7 @@ func (c *Client) handleMessage(raw []byte) {
 }
 ```
 
-### 7.4 WS Server
+### 8.4 WS Server
 
 ```go
 // internal/ws/server.go
@@ -1254,9 +1640,9 @@ func (c *Client) pullOfflineMessages() {
 
 ---
 
-## 8. 在线状态管理
+## 9. 在线状态管理
 
-### 8.1 Redis 数据结构
+### 9.1 Redis 数据结构
 
 ```
 # 用户在线状态（Hash，存平台和连接信息）
@@ -1274,7 +1660,7 @@ Value: {"conn-001", "conn-002"}
 TTL:   60s（心跳续期）
 ```
 
-### 8.2 上线/下线/续期
+### 9.2 上线/下线/续期
 
 ```go
 func (h *Hub) setOnline(userID, connID, platform string) {
@@ -1321,9 +1707,9 @@ func (h *Hub) IsOnline(userID string) bool {
 
 ---
 
-## 9. 统一响应与错误码
+## 10. 统一响应与错误码
 
-### 9.1 错误码体系
+### 10.1 错误码体系
 
 ```go
 // pkg/errcode/errcode.go
@@ -1365,7 +1751,7 @@ var (
 )
 ```
 
-### 9.2 统一响应
+### 10.2 统一响应
 
 ```go
 // pkg/resp/resp.go
@@ -1398,9 +1784,9 @@ func FailWithStatus(c *gin.Context, httpStatus int, err *errcode.Code) {
 
 ---
 
-## 10. 中间件实现
+## 11. 中间件实现
 
-### 10.1 JWT 鉴权中间件
+### 11.1 JWT 鉴权中间件
 
 ```go
 // internal/middleware/auth.go
@@ -1443,7 +1829,7 @@ func JWTAuth(jwtCfg config.JWTConfig) gin.HandlerFunc {
 }
 ```
 
-### 10.2 限流中间件
+### 11.2 限流中间件
 
 ```go
 // internal/middleware/ratelimit.go
@@ -1471,7 +1857,7 @@ func RateLimit(rdb *redis.Client, rate int, window time.Duration) gin.HandlerFun
 }
 ```
 
-### 10.3 CORS 中间件
+### 11.3 CORS 中间件
 
 ```go
 // internal/middleware/cors.go
@@ -1494,7 +1880,7 @@ func CORS() gin.HandlerFunc {
 
 ---
 
-## 11. Makefile 与构建
+## 12. Makefile 与构建
 
 ```makefile
 # Makefile
@@ -1556,7 +1942,7 @@ swagger:
 
 ---
 
-## 12. Docker 与开发环境
+## 13. Docker 与开发环境
 
 ### 12.1 Dockerfile
 
@@ -1580,7 +1966,179 @@ EXPOSE 8080 8081
 ENTRYPOINT ["gim"]
 ```
 
-### 12.2 docker-compose.yaml
+### 13.2 docker-compose.yaml（开发环境）
+
+💡 **为什么用 Docker Compose 开发？** Docker Compose 可以一键启动开发所需的所有依赖（MySQL、Redis），无需手动安装，保证所有开发者环境一致。同时也可以方便地清空数据重新测试。
+
+```yaml
+# deploy/docker-compose.yaml
+version: "3.8"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: gim-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: gim
+      MYSQL_USER: gim
+      MYSQL_PASSWORD: gim_pass
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./deploy/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - gim-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: gim-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --requirepass ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - gim-network
+
+  # 本地开发时可选：启动应用服务
+  gim:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: gim-app
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      GIM_SERVER_HTTPPORT: 8080
+      GIM_SERVER_WSPORT: 8081
+      GIM_MYSQL_HOST: mysql
+      GIM_MYSQL_PORT: 3306
+      GIM_MYSQL_USER: gim
+      GIM_MYSQL_PASSWORD: gim_pass
+      GIM_MYSQL_DBNAME: gim
+      GIM_REDIS_HOST: redis
+      GIM_REDIS_PORT: 6379
+      GIM_REDIS_DB: 0
+    networks:
+      - gim-network
+    profiles:
+      - app  # 使用 profile 区分，默认不启动应用
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  gim-network:
+    driver: bridge
+```
+
+#### Docker Compose 使用方法
+
+💡 **开发环境两种使用方式：**
+
+1. **仅启动依赖服务**（推荐用于本地开发）
+   - 只启动 MySQL 和 Redis，应用在本地运行
+   - 优势：修改代码立即生效，调试方便
+
+   ```bash
+   # 启动依赖服务
+   make docker-up   # 或 docker compose -f deploy/docker-compose.yaml up -d mysql redis
+
+   # 查看服务状态
+   docker compose ps
+
+   # 查看日志
+   docker compose logs mysql
+   docker compose logs redis
+
+   # 停止服务
+   make docker-down  # 或 docker compose -f deploy/docker-compose.yaml down
+
+   # 清空数据（重新初始化）
+   docker compose down -v  # 删除 volumes，会清空所有数据
+   ```
+
+2. **启动完整服务**（用于部署测试）
+   - 同时启动 MySQL、Redis 和应用服务
+   - 优势：环境一致，适合部署测试
+
+   ```bash
+   # 启动所有服务（包括应用）
+   docker compose --profile app up -d
+
+   # 查看应用日志
+   docker compose logs -f gim
+
+   # 重启应用
+   docker compose restart gim
+
+   # 停止所有服务
+   docker compose --profile app down
+   ```
+
+#### MySQL 初始化脚本
+
+```sql
+-- deploy/mysql/init.sql
+-- 数据库初始化脚本（容器启动时自动执行）
+CREATE DATABASE IF NOT EXISTS gim CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE gim;
+
+-- 创建基础表结构
+-- 注意：实际建表使用 golang-migrate 迁移工具
+-- 这里只创建数据库，表结构通过迁移创建
+```
+
+#### 本地开发配置
+
+```yaml
+# configs/config.yaml（本地开发配置）
+server:
+  httpPort: 8080
+  wsPort: 8081
+  readTimeout: 10s
+  writeTimeout: 10s
+
+mysql:
+  host: localhost  # Docker Compose 启动后映射到本地
+  port: 3306
+  user: gim
+  password: gim_pass
+  dbname: gim
+  maxOpenConns: 100
+  maxIdleConns: 10
+  connMaxLifetime: 3600s
+
+redis:
+  host: localhost
+  port: 6379
+  password: ""
+  db: 0
+  poolSize: 10
+
+# ... 其他配置
+```
 
 ```yaml
 # deploy/docker-compose.yaml
@@ -1628,9 +2186,9 @@ volumes:
 
 ---
 
-## 13. 数据库迁移
+## 14. 数据库迁移
 
-### 13.1 迁移文件命名规范
+### 14.1 迁移文件命名规范
 
 ```
 migrations/
@@ -1646,7 +2204,7 @@ migrations/
     000005_create_user_conversation_seq_table.down.sql
 ```
 
-### 13.2 迁移示例
+### 14.2 迁移示例
 
 ```sql
 -- migrations/000001_create_users_table.up.sql
@@ -1673,9 +2231,9 @@ DROP TABLE IF EXISTS users;
 
 ---
 
-## 14. 第二阶段实现要点
+## 15. 第二阶段实现要点
 
-### 14.1 gRPC Protobuf 定义示例
+### 15.1 gRPC Protobuf 定义示例
 
 ```protobuf
 // api/msg/msg.proto
@@ -1705,7 +2263,7 @@ message SendMsgResp {
 }
 ```
 
-### 14.2 Kafka 消息流转改造
+### 15.2 Kafka 消息流转改造
 
 第二阶段核心改造点：消息发送从同步写库变为异步写 Kafka。
 
@@ -1726,7 +2284,7 @@ Kafka Topic 设计：
 | toPush | 8 | rpc-msg | Push 服务 | 在线推送通知 |
 | toOfflinePush | 4 | Push 服务 | OfflinePush 服务 | 离线推送 |
 
-### 14.3 MongoDB 文档分片写入
+### 15.3 MongoDB 文档分片写入
 
 ```go
 // internal/mongo/message.go
@@ -1753,7 +2311,7 @@ func (r *msgMongoRepo) BatchInsert(ctx context.Context, msgs []*MsgDoc) error {
 }
 ```
 
-### 14.4 WS Gateway 改造为 WS+gRPC 双协议
+### 15.4 WS Gateway 改造为 WS+gRPC 双协议
 
 ```go
 // 第二阶段 gim-ws 增加 gRPC 服务器
@@ -1786,7 +2344,7 @@ func (s *WSServer) OnlineBatchPushOneMsg(ctx context.Context, req *pb.OnlineBatc
 }
 ```
 
-### 14.5 群消息扇出
+### 15.5 群消息扇出
 
 ```go
 // Push 服务中群消息推送逻辑
@@ -1823,9 +2381,9 @@ func (s *pushService) handleGroupMsg(ctx context.Context, msg *PushMsg) error {
 
 ---
 
-## 15. 第三阶段实现要点
+## 16. 第三阶段实现要点
 
-### 15.1 Prometheus 指标埋点
+### 16.1 Prometheus 指标埋点
 
 ```go
 // internal/middleware/metrics.go
@@ -1855,7 +2413,7 @@ func MetricsMiddleware() gin.HandlerFunc {
 }
 ```
 
-### 15.2 OpenTelemetry 链路追踪
+### 16.2 OpenTelemetry 链路追踪
 
 ```go
 // internal/trace/trace.go
@@ -1878,7 +2436,7 @@ func InitTracer(serviceName, jaegerEndpoint string) (*sdktrace.TracerProvider, e
 }
 ```
 
-### 15.3 Helm Chart 结构
+### 16.3 Helm Chart 结构
 
 ```
 deploy/k8s/helm/gim/
@@ -1902,7 +2460,7 @@ deploy/k8s/helm/gim/
 │   └── hpa.yaml
 ```
 
-### 15.4 HPA 配置
+### 16.4 HPA 配置
 
 ```yaml
 # templates/hpa.yaml — WS Gateway 按连接数伸缩
@@ -1935,11 +2493,11 @@ spec:
 
 ---
 
-## 16. 第四阶段实现要点
+## 17. 第四阶段实现要点
 
 > 第四阶段（AI Agent）的完整架构设计、核心代码、数据模型、TODO 详见 [AI_AGENT.md](AI_AGENT.md)。这里只列出与前三阶段代码的关键集成点。
 
-### 16.1 AI Service 接入 WS Gateway
+### 17.1 AI Service 接入 WS Gateway
 
 在 WS Client 的 `handleMessage` 方法中增加 AI 消息类型的路由：
 
@@ -1960,7 +2518,7 @@ case 11: // 群 AI 请求
 
 💡 **为什么用 `go` 异步调用？** LLM API 调用可能耗时数秒，如果在 WS 读取协程中同步等待，该用户的所有消息都会被阻塞。异步调用后立即返回，AI 结果通过 WS 推送回来。
 
-### 16.2 Kafka 集成审核 Agent
+### 17.2 Kafka 集成审核 Agent
 
 在 rpc-msg 的消息发送流程中，追加写 `toModeration` Topic：
 

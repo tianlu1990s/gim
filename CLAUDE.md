@@ -15,7 +15,7 @@ gim — A cloud-native Go IM (Instant Messaging) system. Four-phase development:
 
 ## Tech Stack
 
-Go 1.21+, Gin, gorilla/websocket, GORM, golang-migrate, Redis, JWT (RS256), Viper, Zap. Phase 2 adds: gRPC, etcd, Kafka, MongoDB, MinIO. Phase 4 adds: Anthropic Claude API (anthropic-sdk-go), Milvus/pgvector.
+Go 1.26+, Gin, gorilla/websocket, GORM, golang-migrate, Redis, JWT (RS256), Viper, Zap. Phase 2 adds: gRPC, etcd, Kafka, MongoDB, MinIO. Phase 4 adds: Anthropic Claude API (anthropic-sdk-go), Milvus/pgvector.
 
 ## Build & Run
 
