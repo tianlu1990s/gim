@@ -126,7 +126,7 @@ alice 和 bob 的会话：
 ### 2.1 安装 Go
 
 ```bash
-# 下载 Go 1.21+（推荐用最新稳定版）
+# 下载 Go 1.26+（推荐用最新稳定版）
 # 访问 https://go.dev/dl/ 下载对应平台的安装包
 
 # Debian/Ubuntu 也可以用：
@@ -409,7 +409,7 @@ alice 点击"发送"
 cd ~/github.com/gim
 
 # 初始化 Go Module
-go mod init github.com/yourname/gim
+go mod init github.com/tianlu1990s/gim
 
 # 安装核心依赖
 go get github.com/gin-gonic/gin

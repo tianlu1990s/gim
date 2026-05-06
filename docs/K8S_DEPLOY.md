@@ -1789,7 +1789,7 @@ kubectl describe pod <pod-name> -n gim | grep -A5 "Events"
 # - 解决：创建 imagePullSecret
 kubectl create secret docker-registry regcred \
   --docker-server=yourregistry.com \
-  --docker-username=yourname \
+  --docker-username=tianlu1990s \
   --docker-password=yourpass \
   -n gim
 
@@ -1923,7 +1923,7 @@ kubectl get pods -n gim
 
 ```dockerfile
 # deploy/docker/Dockerfile.api
-FROM golang:1.21-alpine AS builder
+FROM golang:1.26-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
@@ -1940,7 +1940,7 @@ ENTRYPOINT ["gim-api"]
 
 ```dockerfile
 # deploy/docker/Dockerfile.ws
-FROM golang:1.21-alpine AS builder
+FROM golang:1.26-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download

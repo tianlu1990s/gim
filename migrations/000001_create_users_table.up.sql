@@ -1,0 +1,14 @@
+CREATE TABLE users (
+    id         BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id    VARCHAR(64)  NOT NULL UNIQUE,
+    nickname   VARCHAR(64)  NOT NULL DEFAULT '',
+    avatar_url VARCHAR(512) NOT NULL DEFAULT '',
+    password   VARCHAR(128) NOT NULL,
+    phone      VARCHAR(20)  NOT NULL DEFAULT '',
+    email      VARCHAR(128) NOT NULL DEFAULT '',
+    status     TINYINT      NOT NULL DEFAULT 1 COMMENT '1=正常 2=禁用',
+    created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_phone (phone),
+    INDEX idx_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

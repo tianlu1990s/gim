@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: gim-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: gim
+      MYSQL_USER: gim
+      MYSQL_PASSWORD: gim_pass
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - gim-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: gim-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --requirepass ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - gim-network
+
+  gim:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile
+    container_name: gim-app
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      GIM_SERVER_HTTPPORT: 8080
+      GIM_MYSQL_HOST: mysql
+      GIM_MYSQL_PORT: 3306
+      GIM_REDIS_HOST: redis
+      GIM_REDIS_PORT: 6379
+    networks:
+      - gim-network
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  gim-network:
+    driver: bridge

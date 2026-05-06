@@ -66,11 +66,14 @@ AI Agent：
 
 | 组件 | 选择 | 原因 |
 |------|------|------|
-| LLM API | Anthropic Claude API (claude-sonnet-4-6) | 支持 Tool Use、长上下文、高质量中文 |
-| Go SDK | `github.com/anthropics/anthropic-sdk-go` | 官方 Go SDK，支持流式、Tool Use |
+| LLM API | Deepseek API / Claude API / 本地部署（Ollama/vLLM） | 多 Provider 可切换，开发用本地模型，生产按需选 API |
+| AI 接口 | AIProvider 统一接口 | 解耦具体 LLM 实现，一行配置切换后端 |
+| Go SDK | `anthropic-sdk-go` / `openai-go`（Deepseek 兼容 OpenAI 协议） | 按 Provider 选择 SDK，OpenAI 兼容协议覆盖多后端 |
 | 向量数据库 | Milvus (自部署) 或 pgvector | RAG 场景存储文档向量 |
-| Embedding | OpenAI text-embedding-3-small 或本地模型 | 文档向量化 |
+| Embedding | OpenAI text-embedding-3-small 或本地 Embedding | 文档向量化 |
 | 消息队列 | 复用现有 Kafka | Agent 消息消费与业务消息共用管道 |
+
+> **AIProvider 接口设计**：系统通过统一的 `AIProvider` 接口支持多后端切换。开发阶段默认使用本地部署模型（Ollama），生产环境可按需切换 Deepseek API 或 Claude API。Deepseek API 兼容 OpenAI 协议，迁移成本低。详见 PLAN.md 第四阶段技术栈。
 
 ---
 
@@ -95,12 +98,12 @@ AI Agent：
        ▼
 ┌──────────────┐
 │  AI Service   │  1. 构建上下文（最近 N 条消息 + 系统提示词）
-│               │  2. 调用 Claude API（stream=true）
+│               │  2. 调用 AIProvider（stream=true，Deepseek/Claude/本地）
 │               │  3. 逐 chunk 通过 WS 推送给用户
 └──────┬───────┘
        │
        ▼
-  Claude API（流式返回）
+  AIProvider 统一接口 → Deepseek/Claude/本地模型（流式返回）
        │
        ▼
 ┌──────────────┐
@@ -296,13 +299,13 @@ func (a *ReplyAgent) buildMessages(recentMsgs []*model.Message, instruction stri
              ▼
         ┌─────────────────┐
         │  Moderation      │  1. 规则引擎（关键词/正则）快速过滤
-        │  Agent            │  2. 规则未命中 → 调用 Claude + Tool Use
+        │  Agent            │  2. 规则未命中 → 调用 AIProvider + Tool Use
         │                   │  3. LLM 决定是否违规，调用对应工具
         └──────┬───────────┘
                │
                ▼
         ┌─────────────────┐
-        │  Claude API      │  Tool Use（函数调用）
+        │  AIProvider      │  Tool Use（函数调用）
         │  + Tools 定义    │
         └──────┬───────────┘
                │
@@ -1094,9 +1097,10 @@ gim/
 
 ### Week 1-2：智能回复助手
 
-- [ ] 集成 Anthropic Go SDK（`anthropic-sdk-go`）
-- [ ] 实现 AI Service 基础框架（配置、客户端初始化）
-- [ ] 实现 ReplyAgent：构建上下文 + 调用 Claude + 流式输出
+- [ ] 实现 AIProvider 统一接口（支持 Deepseek/Claude/本地模型切换）
+- [ ] 集成 AI SDK：anthropic-sdk-go / openai-go（Deepseek 兼容 OpenAI 协议）
+- [ ] 实现 AI Service 基础框架（配置、多 Provider 客户端初始化）
+- [ ] 实现 ReplyAgent：构建上下文 + 调用 AIProvider + 流式输出
 - [ ] WS 协议扩展：type=10（AI 请求）、type=110（AI 流式回复）
 - [ ] WS Client 处理 type=10 消息，路由到 ReplyAgent
 - [ ] 指令解析：`@gim-bot 翻译/总结/润色`
@@ -1179,7 +1183,10 @@ Multi-Agent 协作（群聊 Agent）
 
 | 主题 | 资源 |
 |------|------|
+| Deepseek API | [Deepseek API 文档](https://platform.deepseek.com/api-docs/)（OpenAI 兼容协议） |
 | Claude API | [Anthropic 官方文档](https://docs.anthropic.com/) + [Go SDK](https://github.com/anthropics/anthropic-sdk-go) |
+| 本地部署 | [Ollama](https://ollama.com/) / [vLLM](https://docs.vllm.ai/)（开发环境本地运行） |
+| OpenAI Go SDK | [openai-go](https://github.com/openai/openai-go)（Deepseek 兼容） |
 | Tool Use | [Anthropic Tool Use 文档](https://docs.anthropic.com/en/docs/build-with-claude/tool-use) |
 | RAG | [Anthropic RAG 教程](https://docs.anthropic.com/en/docs/build-with-claude/retrieval-augmented-generation) |
 | Prompt Engineering | [Anthropic Prompt Engineering 指南](https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview) |
@@ -1193,18 +1200,23 @@ Multi-Agent 协作（群聊 Agent）
 
 ### 11.1 API 调用成本
 
-| Agent | 模型 | 预估日调用量 | 日成本（约） |
-|-------|------|------------|------------|
-| 智能回复 | claude-sonnet-4-6 | 1000 次 | ~$5 |
-| 内容审核 | claude-sonnet-4-6 | 10000 次 | ~$15 |
-| 管理助手 | claude-sonnet-4-6 | 100 次 | ~$1 |
-| 路由判断 | claude-haiku-4-5 | 500 次 | ~$0.1 |
+多 Provider 成本对比（以 1000 次调用估算）：
+
+| Agent | Deepseek API | Claude API | 本地模型（Ollama） |
+|-------|------------|------------|-------------------|
+| 智能回复 | ~$0.5 | ~$5 | 免费（需 GPU） |
+| 内容审核 | ~$2 | ~$15 | 免费（需 GPU） |
+| 管理助手 | ~$0.1 | ~$1 | 免费（需 GPU） |
+| 路由判断 | ~$0.05 | ~$0.1 | 免费（需 GPU） |
+
+> **开发建议**：开发阶段使用本地模型（Ollama）零成本调试；生产环境按预算选择 Deepseek API（高性价比）或 Claude API（复杂推理场景）。
 
 **节省策略：**
 - 规则引擎拦截大部分消息，只有规则未命中的才调 AI（审核 Agent 可减少 80%+ API 调用）
-- 路由判断用 Haiku（便宜 10 倍）
+- 路由判断用轻量模型/本地模型
 - 缓存常见问题的 RAG 检索结果
 - 设置每用户每日 AI 调用次数上限
+- 通过 AIProvider 接口灵活切换后端，按需选择成本最优方案
 
 ### 11.2 安全风险
 

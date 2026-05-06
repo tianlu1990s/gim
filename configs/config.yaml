@@ -1,0 +1,50 @@
+server:
+  httpPort: 8080
+  readTimeout: 10s
+  writeTimeout: 10s
+
+mysql:
+  host: localhost
+  port: 3306
+  user: gim
+  password: gim_pass
+  dbname: gim
+  maxOpenConns: 100
+  maxIdleConns: 10
+  connMaxLifetime: 3600s
+
+redis:
+  host: localhost
+  port: 6379
+  password: ""
+  db: 0
+  poolSize: 10
+
+jwt:
+  accessTokenExpire: 24h
+  refreshTokenExpire: 168h
+  privateKeyPath: "configs/jwt/private.pem"
+  publicKeyPath: "configs/jwt/public.pem"
+
+websocket:
+  port: 8081
+  maxConnPerUser: 5
+  maxMessageSize: 4096
+  writeWait: 10s
+  pongWait: 60s
+  pingPeriod: 30s
+
+log:
+  level: debug
+  format: text
+  output: file
+  filePath: logs/gim.log
+  maxSize: 100
+  maxBackups: 10
+  maxAge: 30
+  compress: true
+  shortFile: true
+  color: true
+
+snowflake:
+  nodeID: 1

@@ -166,12 +166,13 @@
 │                                                           │
 │  ┌─────────────────────────────────────────────────────┐ │
 │  │  基础设施                                            │ │
-│  │  Claude API │ Milvus(向量库) │ Kafka(toModeration)  │ │
+│  │  AI Provider(Deepseek/Claude/Local) │ Milvus(向量库) │ Kafka(toModeration)  │ │
 │  └─────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────┘
 
 接入方式：
   WS Gateway ──(检测@gim-bot)──→ AI Service ──(流式推送)──→ 客户端
+  AI Service ──(AIProvider接口)──→ Deepseek/Claude/本地模型（统一调用）
   Kafka toModeration ──(消费)──→ Moderation Agent ──(审核结果)──→ 业务处理
   Admin API ──(对话接口)──→ Admin Assistant Agent ──(Tool Use)──→ 管理操作
 ```
@@ -184,11 +185,11 @@
 
 | 类别 | 技术 | 用途 |
 |------|------|------|
-| 语言 | Go 1.21+ | 全部业务代码 |
+| 语言 | Go 1.26+ | 全部业务代码 |
 | HTTP 框架 | Gin | REST API |
 | WebSocket | gorilla/websocket | 长连接 |
-| 数据库 | MySQL 8.0 | 全部持久化 |
-| 缓存 | Redis 7 | 在线状态、Token、Seq 缓存 |
+| 数据库 | MySQL 8.4 LTS | 全部持久化 |
+| 缓存 | Redis 7.x | 在线状态、Token、Seq 缓存 |
 | 认证 | JWT (RS256) | 无状态 Token 认证 |
 | 配置 | Viper | YAML 配置管理 |
 | 日志 | Zap | 结构化日志 |
@@ -204,7 +205,7 @@
 | 服务发现 | etcd | RPC 服务注册与发现 |
 | 消息队列 | Kafka | 消息异步写入解耦 |
 | 消息存储 | MongoDB | 消息文档分片存储 |
-| 对象存储 | MinIO | 文件/图片/音视频 |
+| 对象存储 | S3/MinIO/OSS | 文件/图片/音视频（S3 协议兼容） |
 | 限流熔断 | sentinel/ratelimit | 服务保护 |
 
 ### 第三阶段新增
@@ -221,10 +222,13 @@
 
 | 类别 | 技术 | 用途 |
 |------|------|------|
-| LLM API | Anthropic Claude (claude-sonnet-4-6) | 智能回复、内容审核、管理助手 |
-| Go SDK | anthropic-sdk-go | Claude API 调用（流式+Tool Use） |
+| LLM API | Deepseek API / Claude API / 本地部署 | 智能回复、内容审核、管理助手（多 Provider 可切换） |
+| 本地模型 | Ollama / vLLM | 开发环境本地运行，降低 API 成本 |
+| Go SDK | anthropic-sdk-go / openai-go | API 调用（流式+Tool Use），OpenAI 兼容协议 |
 | 向量数据库 | Milvus / pgvector | RAG 知识库存储与检索 |
-| Embedding | OpenAI text-embedding-3-small | 文档向量化 |
+| Embedding | OpenAI text-embedding-3-small / 本地 Embedding | 文档向量化 |
+
+> **AI Provider 设计**：系统通过统一的 `AIProvider` 接口支持多后端切换。开发阶段默认使用本地部署模型（Ollama），生产环境可按需切换 Deepseek API 或 Claude API。Deepseek API 兼容 OpenAI 协议，迁移成本低。
 
 **详细方案**：见 [docs/AI_AGENT.md](docs/AI_AGENT.md)
 
@@ -1299,7 +1303,7 @@ func TestUserRepo_Integration(t *testing.T) {
     mysqlC, _ := testcontainers.GenericContainer(ctx,
         testcontainers.GenericContainerRequest{
             ContainerRequest: testcontainers.ContainerRequest{
-                Image: "mysql:8.0",
+                Image: "mysql:8.4",
                 Env:   map[string]string{"MYSQL_ROOT_PASSWORD": "test", "MYSQL_DATABASE": "gim_test"},
                 ExposedPorts: []string{"3306/tcp"},
             },
@@ -1587,7 +1591,7 @@ api/                        # Protobuf 定义
 - [ ] 在线推送：Push -> gRPC -> WS Gateway -> 客户端
 - [ ] Redis 改造：Seq 缓存、在线状态、本地缓存失效通知
 - [ ] 消息查询迁移到 MongoDB（MySQL messages 表逐步停写）
-- [ ] MinIO 部署 + 文件上传服务 → 文档: [API.md §7](docs/API.md)
+- [ ] S3 兼容存储部署（MinIO/OSS） + 文件上传服务 → 文档: [API.md §7](docs/API.md)
 
 #### Week 7-10：群聊功能
 
@@ -1662,9 +1666,10 @@ api/                        # Protobuf 定义
 
 #### Week 1-2：智能回复助手
 
-- [ ] 集成 Anthropic Go SDK（`anthropic-sdk-go`）
-- [ ] 实现 AI Service 基础框架（配置、客户端初始化）
-- [ ] 实现 ReplyAgent：构建上下文 + 调用 Claude API + 流式输出
+- [ ] 实现 AIProvider 统一接口（支持 Deepseek/Claude/本地模型切换）
+- [ ] 集成 AI SDK：anthropic-sdk-go / openai-go（Deepseek 兼容 OpenAI 协议）
+- [ ] 实现 AI Service 基础框架（配置、多 Provider 客户端初始化）
+- [ ] 实现 ReplyAgent：构建上下文 + 调用 AI API + 流式输出
 - [ ] WS 协议扩展：type=10（AI 请求）、type=110（AI 流式回复） → 定义: [AI_AGENT.md §4.3](docs/AI_AGENT.md)
 - [ ] 指令解析：`@gim-bot 翻译/总结/润色`
 - [ ] 前端展示 AI 流式回复（打字机效果）
@@ -1676,7 +1681,7 @@ api/                        # Protobuf 定义
 - [ ] 数据库迁移：violations、sensitive_words 表
 - [ ] 敏感词库管理（CRUD API + 批量导入）
 - [ ] 规则引擎：关键词匹配（精确 + 模糊，第一层快速过滤）
-- [ ] ModerationAgent：Claude Tool Use 定义 → 定义: [AI_AGENT.md §5.3](docs/AI_AGENT.md)
+- [ ] ModerationAgent：AI Tool Use 定义（通过 AIProvider 接口） → 定义: [AI_AGENT.md §5.3](docs/AI_AGENT.md)
   - [ ] mark_violation（记录违规，不撤回）
   - [ ] revoke_message（撤回消息+通知用户）
   - [ ] warn_user（警告用户）
@@ -1761,7 +1766,14 @@ api/                        # Protobuf 定义
 - 前三阶段搭建 IM 基础设施（消息管道、推送、Kafka、K8S），AI Agent 复用这些设施而非从零搭建
 - 同时学习 IM 架构 + AI Agent 认知负荷太高，先打好后端基础
 - Agent 接入 IM 的方式是"消息消费者"，必须先有成熟的消息管道
-- 第四阶段 Agent 使用的 Claude API 需要付费，延迟到后期可以控制成本
+- 第四阶段通过 AIProvider 接口统一多后端（Deepseek/Claude/本地模型），开发期用本地模型零成本验证，生产环境灵活切换
+
+### 为什么支持多 AI Provider 而非绑定单一服务？
+
+- Deepseek API 兼容 OpenAI 协议，性价比高，中文理解能力强
+- 本地部署模型（Ollama/vLLM）在开发阶段零成本，离线可用，数据不出本机
+- Claude API 在复杂推理和 Tool Use 方面表现最佳，适合高要求场景
+- 统一的 AIProvider 接口允许按场景选择最优模型（路由用便宜模型，深度推理用强模型）
 
 ### 为什么内容审核用"规则引擎 + AI"混合而非纯 AI？
 
@@ -1787,7 +1799,10 @@ api/                        # Protobuf 定义
 
 | 技术点 | 资源 |
 |--------|------|
+| Deepseek API | [Deepseek API 文档](https://platform.deepseek.com/docs)（兼容 OpenAI 协议） |
 | Claude API | [Anthropic 官方文档](https://docs.anthropic.com/) + [Go SDK](https://github.com/anthropics/anthropic-sdk-go) |
+| 本地部署 | [Ollama](https://ollama.com/) / [vLLM](https://docs.vllm.ai/)（GPU 推理加速） |
+| OpenAI Go SDK | [openai-go](https://github.com/openai/openai-go)（Deepseek 兼容） |
 | Tool Use | [Anthropic Tool Use 文档](https://docs.anthropic.com/en/docs/build-with-claude/tool-use) |
 | RAG | [Anthropic RAG 教程](https://docs.anthropic.com/en/docs/build-with-claude/retrieval-augmented-generation) |
 | Prompt Engineering | [Anthropic Prompt Engineering 指南](https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview) |
@@ -1801,7 +1816,7 @@ api/                        # Protobuf 定义
 |--------|------|
 | Go 语言 | [Go 官方教程](https://go.dev/tour/) + [Go by Example](https://gobyexample.com/) |
 | HTTP/API | [MDN HTTP 教程](https://developer.mozilla.org/zh-CN/docs/Web/HTTP) |
-| MySQL | [MySQL 入门教程](https://dev.mysql.com/doc/refman/8.0/en/tutorial.html) |
+| MySQL | [MySQL 入门教程](https://dev.mysql.com/doc/refman/8.4/en/tutorial.html) |
 | Redis | [Redis 入门](https://redis.io/docs/getting-started/) |
 | Docker | [Docker 入门教程](https://docs.docker.com/get-started/) |
 | Gin 框架 | [Gin 官方文档](https://gin-gonic.com/docs/quickstart/) |

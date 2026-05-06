@@ -9,13 +9,13 @@ gim — A cloud-native Go IM (Instant Messaging) system. Four-phase development:
 ## Architecture
 
 - Phase 1: Monolith (Gin HTTP + gorilla/websocket + MySQL + Redis)
-- Phase 2: Microservices (gRPC + etcd + Kafka + MongoDB + MinIO)
+- Phase 2: Microservices (gRPC + etcd + Kafka + MongoDB + S3/MinIO/OSS)
 - Phase 3: K8S (Helm + Prometheus + Grafana + OpenTelemetry)
-- Phase 4: AI Agents (Claude API + Tool Use + RAG + Multi-Agent)
+- Phase 4: AI Agents (Deepseek/Claude/Local + Tool Use + RAG + Multi-Agent)
 
 ## Tech Stack
 
-Go 1.26+, Gin, gorilla/websocket, GORM, golang-migrate, Redis, JWT (RS256), Viper, Zap. Phase 2 adds: gRPC, etcd, Kafka, MongoDB, MinIO. Phase 4 adds: Anthropic Claude API (anthropic-sdk-go), Milvus/pgvector.
+Go 1.26+, Gin, gorilla/websocket, GORM, golang-migrate, Redis, JWT (RS256), Viper, Zap. Phase 2 adds: gRPC, etcd, Kafka, MongoDB, S3/MinIO/OSS. Phase 4 adds: AI Provider (Deepseek/Claude/Local, anthropic-sdk-go / openai-go), Milvus/pgvector.
 
 ## Build & Run
 

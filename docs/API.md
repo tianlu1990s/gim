@@ -1129,7 +1129,7 @@ Authorization: Bearer <accessToken>
 
 ### 7.1 POST /file/upload
 
-上传文件到 MinIO。
+上传文件到 S3 兼容存储（MinIO/OSS）。
 
 **请求格式：** `multipart/form-data`
 
